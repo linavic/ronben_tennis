@@ -1,12 +1,24 @@
 import 'package:flutter/material.dart';
+import 'package:camera/camera.dart';
+import 'package:audioplayers/audioplayers.dart';
+import 'package:google_mlkit_object_detection/google_mlkit_object_detection.dart';
 import 'dart:math';
 
-void main() {
+List<CameraDescription> cameras = [];
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  try {
+    cameras = await availableCameras();
+  } catch (e) {
+    debugPrint("Camera initialization error: $e");
+  }
   runApp(const RonbenTennisAiApp());
 }
 
 class RonbenTennisAiApp extends StatelessWidget {
   const RonbenTennisAiApp({Key? key}) : super(key: key);
+  
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -23,15 +35,21 @@ class RonbenTennisAiApp extends StatelessWidget {
 
 class CourtAnalyzerScreen extends StatefulWidget {
   const CourtAnalyzerScreen({Key? key}) : super(key: key);
+
   @override
   State<CourtAnalyzerScreen> createState() => CourtAnalyzerScreenState();
 }
 
 class CourtAnalyzerScreenState extends State<CourtAnalyzerScreen> with SingleTickerProviderStateMixin {
+  CameraController? _cameraController;
+  ObjectDetector? _objectDetector;
+  final AudioPlayer _audioPlayer = AudioPlayer();
+
   String _gameMode = "טניס"; 
-  bool _isCourtReady = true; 
+  bool _isCourtReady = false; 
+  bool _isDetecting = false;
   bool _isOutDetected = false;
-  String _aiStatusMessage = "AI CORE: CONNECTED TO GPU SERVER // STREAMING TEST MATCH";
+  String _aiStatusMessage = "SYSTEM: READY // STANDBY FOR CALIBRATION";
   
   double? _ballX;
   double? _ballY;
@@ -47,33 +65,140 @@ class CourtAnalyzerScreenState extends State<CourtAnalyzerScreen> with SingleTic
   final double courtTop = 200.0;
   final double courtBottom = 480.0;
 
-  // פונקציה שמקבלת את הנתונים האמיתיים משרת ה-AI של כרטיס המסך
-  void receiveGpuData(double x, double y, bool isOut, bool hitWallDirectly) {
+  late AnimationController _blinkController;
+
+  @override
+  void initState() {
+    super.initState();
+    _blinkController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 700),
+    )..repeat(reverse: true);
+    _initializeHardware();
+  }
+
+  void _initializeHardware() async {
+    final options = ObjectDetectorOptions(
+      mode: DetectionMode.stream,
+      classifyObjects: true,
+      multipleObjects: false,
+    );
+    _objectDetector = ObjectDetector(options: options);
+
+    if (cameras.isNotEmpty) {
+      _cameraController = CameraController(
+        cameras[0],
+        ResolutionPreset.high,
+        enableAudio: false,
+      );
+
+      await _cameraController!.initialize();
+      if (!mounted) return;
+
+      setState(() {
+        _isCourtReady = true;
+        _aiStatusMessage = "SUCCESS: CAMERA HARDWARE ONLINE";
+      });
+    }
+  }
+
+  void _analyzeImpactLocation(double x, double y, bool hitWallDirectly) {
+    bool isOutsideLines = (x < courtLeft || x > courtRight || y < courtTop || y > courtBottom);
+    final random = Random();
+
+    _shotTrajectory = [
+      Offset(x - 60, y - 80),
+      Offset(x - 30, y - 40),
+      Offset(x, y), 
+    ];
+
     setState(() {
       _ballX = x;
       _ballY = y;
-      _mockSpeed = 110.0 + Random().nextInt(60);
-      _shotTrajectory = [Offset(x - 40, y - 60), Offset(x, y)];
+      _mockSpeed = 105.0 + random.nextInt(75); 
 
-      if (isOut) {
-        if (_gameMode == "פאדל" && !hitWallDirectly) {
-          _aiStatusMessage = "TRACKING: IN // BOUNCE THEN WALL IMPACT (VALID)";
+      if (_gameMode == "טניס") {
+        if (isOutsideLines) {
+          _triggerOut("OUT DETECTED // POINT TO PLAYER B");
+          _updateScore(playerBScore: true);
         } else {
-          _isOutDetected = true;
-          _aiStatusMessage = "CRITICAL: !! OUT !! BOUNDARY VIOLATION";
-          _playerBScoreIndex = (_playerBScoreIndex < _tennisScores.length - 1) ? _playerBScoreIndex + 1 : _playerBScoreIndex;
+          _aiStatusMessage = "IN DETECTED // PLAY CONTINUES";
         }
       } else {
-        _aiStatusMessage = "TRACKING: IN // IMPACT REGISTERED";
-        _playerAScoreIndex = (_playerAScoreIndex < _tennisScores.length - 1) ? _playerAScoreIndex + 1 : _playerAScoreIndex;
+        if (isOutsideLines) {
+          if (hitWallDirectly) {
+            _triggerOut("OUT: DIRECT WALL IMPACT // POINT TO PLAYER B");
+            _updateScore(playerBScore: true);
+          } else {
+            _aiStatusMessage = "IN: BOUNCE THEN WALL // VALID PADEL SHOT";
+          }
+        } else {
+          _aiStatusMessage = "IN DETECTED // FLOOR REBOUND REGISTERED";
+        }
       }
     });
+  }
 
-    if (_isOutDetected) {
-      Future.delayed(const Duration(milliseconds: 1200), () {
-        if (mounted) setState(() => _isOutDetected = false);
-      });
+  void _updateScore({required bool playerBScore}) {
+    setState(() {
+      if (playerBScore) {
+        if (_playerBScoreIndex < _tennisScores.length - 1) _playerBScoreIndex++;
+      } else {
+        if (_playerAScoreIndex < _tennisScores.length - 1) _playerAScoreIndex++;
+      }
+      
+      if (_tennisScores[_playerAScoreIndex] == "Game" || _tennisScores[_playerBScoreIndex] == "Game") {
+        _aiStatusMessage = "MATCH SET OVER // SCORES RESETTING...";
+        Future.delayed(const Duration(seconds: 2), () {
+          setState(() {
+            _playerAScoreIndex = 0;
+            _playerBScoreIndex = 0;
+          });
+        });
+      }
+    });
+  }
+
+  void _triggerOut(String message) async {
+    if (_isOutDetected) return;
+    setState(() {
+      _isOutDetected = true;
+      _aiStatusMessage = message;
+    });
+
+    try {
+      await _audioPlayer.play(UrlSource('https://www.soundjay.com/buttons/sounds/button-2.mp3'));
+    } catch (e) {
+      debugPrint("Audio error: $e");
     }
+
+    Future.delayed(const Duration(milliseconds: 1300), () {
+      if (mounted) setState(() => _isOutDetected = false);
+    });
+  }
+
+  void _simulateShot({required bool forceOut, bool wallFirst = false}) {
+    final random = Random();
+    double x, y;
+
+    if (forceOut) {
+      x = random.nextBool() ? courtLeft - 18 : courtRight + 18;
+      y = random.nextBool() ? courtTop - 18 : courtBottom - 18;
+    } else {
+      x = courtLeft + random.nextDouble() * (courtRight - courtLeft);
+      y = courtTop + random.nextDouble() * (courtBottom - courtTop);
+    }
+
+    _analyzeImpactLocation(x, y, wallFirst);
+  }
+
+  @override
+  void dispose() {
+    _cameraController?.dispose();
+    _objectDetector?.close();
+    _audioPlayer.dispose();
+    _blinkController.dispose();
+    super.dispose();
   }
 
   @override
@@ -81,14 +206,19 @@ class CourtAnalyzerScreenState extends State<CourtAnalyzerScreen> with SingleTic
     return Scaffold(
       body: Stack(
         children: [
-          Positioned.fill(child: CustomPaint(painter: TechGridPainter())),
+          // תצוגת המצלמה החיה ברקע של האפליקציה בנייד
+          _cameraController != null && _cameraController!.value.isInitialized
+              ? SizedBox.expand(child: CameraPreview(_cameraController!))
+              : const Center(child: CircularProgressIndicator(color: Color(0xFF00FF66))),
+
           Positioned.fill(
             child: CustomPaint(
-              painter: OfficialCourtPainter(courtLeft, courtRight, courtTop, courtBottom, _ballX, _ballY, _gameMode, _shotTrajectory),
+              painter: OfficialCourtPainter(
+                courtLeft, courtRight, courtTop, courtBottom, 
+                _ballX, _ballY, _gameMode, _isCourtReady, _shotTrajectory
+              ),
             ),
           ),
-          
-          // דשבורד עליון ולוח תוצאות
           Positioned(
             top: 45, left: 15, right: 15,
             child: Container(
@@ -99,7 +229,24 @@ class CourtAnalyzerScreenState extends State<CourtAnalyzerScreen> with SingleTic
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Text("GPU ACCELERATION: ACTIVE // 60 FPS", style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFF00FF66), fontFamily: 'monospace')),
+                      Row(
+                        children: [
+                          AnimatedBuilder(
+                            animation: _blinkController,
+                            builder: (context, child) {
+                              return Container(
+                                width: 8, height: 8,
+                                decoration: BoxDecoration(
+                                  color: _isCourtReady ? const Color(0xFF00FF66) : Colors.redAccent.withOpacity(_blinkController.value),
+                                  shape: BoxShape.circle
+                                ),
+                              );
+                            },
+                          ),
+                          const SizedBox(width: 8),
+                          Text(_isCourtReady ? "AI ENGINE: LIVE" : "AI ENGINE: SCANNING", style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFF00FF66))),
+                        ],
+                      ),
                       DropdownButton<String>(
                         value: _gameMode,
                         underline: const SizedBox(),
@@ -107,7 +254,9 @@ class CourtAnalyzerScreenState extends State<CourtAnalyzerScreen> with SingleTic
                           DropdownMenuItem(value: "טניס", child: Text("TENNIS")),
                           DropdownMenuItem(value: "פאדל", child: Text("PADEL")),
                         ],
-                        onChanged: (val) { if (val != null) setState(() => _gameMode = val); },
+                        onChanged: (val) {
+                          if (val != null) setState(() => _gameMode = val);
+                        },
                       )
                     ],
                   ),
@@ -115,8 +264,8 @@ class CourtAnalyzerScreenState extends State<CourtAnalyzerScreen> with SingleTic
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceAround,
                     children: [
-                      Text("PLAYER A: ${_tennisScores[_playerAScoreIndex]}", style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF00E5FF))),
-                      Text("PLAYER B: ${_tennisScores[_playerBScoreIndex]}", style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
+                      Text("PLAYER A: ${_tennisScores[_playerAScoreIndex]}", style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF00E5FF))),
+                      Text("PLAYER B: ${_tennisScores[_playerBScoreIndex]}", style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white)),
                     ],
                   ),
                   const Divider(color: Colors.white12, height: 12),
@@ -125,18 +274,6 @@ class CourtAnalyzerScreenState extends State<CourtAnalyzerScreen> with SingleTic
               ),
             ),
           ),
-
-          // מד מהירות בצד
-          Positioned(
-            top: 175, left: 15,
-            child: Container(
-              padding: const EdgeInsets.all(6),
-              color: Colors.black.withOpacity(0.6),
-              child: Text("BALL SPEED: ${_mockSpeed.toStringAsFixed(0)} KM/H", style: const TextStyle(fontSize: 10, color: Color(0xFF00E5FF), fontFamily: 'monospace')),
-            ),
-          ),
-
-          // אפקט פלאש אאוט
           if (_isOutDetected)
             Positioned.fill(
               child: Container(
@@ -146,8 +283,6 @@ class CourtAnalyzerScreenState extends State<CourtAnalyzerScreen> with SingleTic
                 ),
               ),
             ),
-
-          // כפתורי הדמיה מהירים (עד שנחבר את הפייתון שיזרוק נתונים אוטומטית)
           Positioned(
             bottom: 25, left: 15, right: 15,
             child: Row(
@@ -155,16 +290,19 @@ class CourtAnalyzerScreenState extends State<CourtAnalyzerScreen> with SingleTic
                 Expanded(
                   child: ElevatedButton(
                     style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF101C2C)),
-                    onPressed: () => receiveGpuData(courtLeft + 50, courtTop + 50, false, false),
-                    child: const Text("TEST IN IMPACT"),
+                    onPressed: () {
+                      _simulateShot(forceOut: false);
+                      _updateScore(playerBScore: false); 
+                    },
+                    child: const Text("SIMULATE IN"),
                   ),
                 ),
                 const SizedBox(width: 10),
                 Expanded(
                   child: ElevatedButton(
                     style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF2C1010)),
-                    onPressed: () => receiveGpuData(courtLeft - 15, courtTop - 15, true, true),
-                    child: const Text("TEST OUT IMPACT"),
+                    onPressed: () => _simulateShot(forceOut: true, wallFirst: true),
+                    child: Text(_gameMode == "טניס" ? "SIMULATE OUT" : "WALL DIRECT HIT"),
                   ),
                 ),
               ],
@@ -177,8 +315,8 @@ class CourtAnalyzerScreenState extends State<CourtAnalyzerScreen> with SingleTic
 }
 
 class OfficialCourtPainter extends CustomPainter {
-  final double l, r, t, b; final double? bx, by; final String mode; final List<Offset> trajectory;
-  OfficialCourtPainter(this.l, this.r, this.t, this.b, this.bx, this.by, this.mode, this.trajectory);
+  final double l, r, t, b; final double? bx, by; final String mode; final bool isReady; final List<Offset> trajectory;
+  OfficialCourtPainter(this.l, this.r, this.t, this.b, this.bx, this.by, this.mode, this.isReady, this.trajectory);
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -197,7 +335,6 @@ class OfficialCourtPainter extends CustomPainter {
     }
     if (bx != null && by != null) {
       canvas.drawCircle(Offset(bx!, by!), 6, Paint()..color = const Color(0xFF00FF66));
-      canvas.drawCircle(Offset(bx!, by!), 14, Paint()..color = const Color(0xFF00FF66).withOpacity(0.15)..style = PaintingStyle.fill);
     }
   }
   @override
