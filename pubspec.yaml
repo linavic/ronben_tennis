@@ -32,7 +32,8 @@ dependencies:
     sdk: flutter
     camera: ^0.10.5+5
     audioplayers: ^6.0.0
-    google_mlkit_object_detection: ^0.7.0 # מנוע ה-AI הרשמי של גוגל לזיהוי אובייקטים בזמן אמת
+    google_mlkit_object_detection: ^0.7.0
+    cupertino_icons: ^1.0.8
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
